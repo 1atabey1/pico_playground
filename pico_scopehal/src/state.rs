@@ -1,4 +1,10 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 
 use anyhow::{Context, Result, bail};
 use parking_lot::RwLock;
@@ -64,6 +70,7 @@ pub(crate) struct ChannelState {
     pub(crate) coupling: PicoCoupling,
     pub(crate) range: PicoRange,
     pub(crate) offset: f32,
+    pub(crate) bandwidth_limit_mhz: Option<u32>,
 }
 
 impl Default for ChannelState {
@@ -73,8 +80,38 @@ impl Default for ChannelState {
             coupling: PicoCoupling::DC,
             range: PicoRange::X1_PROBE_2V,
             offset: 0.0,
+            bandwidth_limit_mhz: None,
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct AwgState {
+    pub(crate) enabled: bool,
+    pub(crate) frequency_hz: f64,
+    pub(crate) duty_cycle: f32,
+    pub(crate) range_vpp: f32,
+    pub(crate) offset_v: f32,
+    pub(crate) shape: String,
+}
+
+impl Default for AwgState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency_hz: 1_000.0,
+            duty_cycle: 50.0,
+            range_vpp: 1.0,
+            offset_v: 0.0,
+            shape: "SINE".into(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct DigitalChannelState {
+    pub(crate) threshold_mv: f32,
+    pub(crate) hysteresis_mv: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -131,6 +168,10 @@ pub(crate) struct AppState {
     pub(crate) metadata: DeviceMetadata,
     channels: RwLock<Vec<ChannelState>>,
     acquisition: RwLock<AcquisitionState>,
+    awg: RwLock<AwgState>,
+    digital: RwLock<HashMap<String, DigitalChannelState>>,
+    adc_bits: AtomicU32,
+    last_sequence: AtomicU32,
 }
 
 impl AppState {
@@ -151,6 +192,10 @@ impl AppState {
             metadata,
             channels: RwLock::new(channel_states),
             acquisition: RwLock::new(AcquisitionState::default()),
+            awg: RwLock::new(AwgState::default()),
+            digital: RwLock::new(HashMap::new()),
+            adc_bits: AtomicU32::new(8),
+            last_sequence: AtomicU32::new(0),
         }
     }
 
@@ -315,6 +360,19 @@ impl AppState {
         }
     }
 
+    pub(crate) fn channel_bandwidth_limit(&self, index: usize) -> Option<u32> {
+        self.channels
+            .read()
+            .get(index)
+            .and_then(|c| c.bandwidth_limit_mhz)
+    }
+
+    pub(crate) fn set_channel_bandwidth_limit(&self, index: usize, limit_mhz: Option<u32>) {
+        if let Some(state) = self.channels.write().get_mut(index) {
+            state.bandwidth_limit_mhz = limit_mhz;
+        }
+    }
+
     pub(crate) fn set_trigger_source(&self, index: usize) {
         self.acquisition.write().trigger_source = index;
     }
@@ -346,6 +404,83 @@ impl AppState {
     pub(crate) fn trigger_edge(&self) -> TriggerEdge {
         self.acquisition.read().trigger_edge
     }
+
+    pub(crate) fn adc_bits(&self) -> u32 {
+        self.adc_bits.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_adc_bits(&self, bits: u32) -> Result<()> {
+        if !(8..=16).contains(&bits) {
+            bail!("unsupported ADC resolution {bits}");
+        }
+        self.adc_bits.store(bits, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub(crate) fn awg_state(&self) -> AwgState {
+        self.awg.read().clone()
+    }
+
+    pub(crate) fn set_awg_enabled(&self, enabled: bool) {
+        self.awg.write().enabled = enabled;
+    }
+
+    pub(crate) fn set_awg_frequency(&self, hz: f64) {
+        self.awg.write().frequency_hz = hz.max(0.0);
+    }
+
+    pub(crate) fn set_awg_duty(&self, duty: f32) {
+        let duty = duty.clamp(0.0, 100.0);
+        self.awg.write().duty_cycle = duty;
+    }
+
+    pub(crate) fn set_awg_range(&self, range_vpp: f32) {
+        self.awg.write().range_vpp = range_vpp.max(0.0);
+    }
+
+    pub(crate) fn set_awg_offset(&self, offset_v: f32) {
+        self.awg.write().offset_v = offset_v;
+    }
+
+    pub(crate) fn set_awg_shape(&self, shape: &str) {
+        self.awg.write().shape = shape.to_string();
+    }
+
+    pub(crate) fn update_sequence(&self, sequence: u32) {
+        self.last_sequence.store(sequence, Ordering::Relaxed);
+    }
+
+    pub(crate) fn last_sequence(&self) -> u32 {
+        self.last_sequence.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn digital_threshold(&self, key: &str) -> f32 {
+        self.digital
+            .read()
+            .get(&normalize_key(key))
+            .map(|d| d.threshold_mv)
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn set_digital_threshold(&self, key: &str, threshold_mv: f32) {
+        let mut guard = self.digital.write();
+        let entry = guard.entry(normalize_key(key)).or_default();
+        entry.threshold_mv = threshold_mv;
+    }
+
+    pub(crate) fn digital_hysteresis(&self, key: &str) -> f32 {
+        self.digital
+            .read()
+            .get(&normalize_key(key))
+            .map(|d| d.hysteresis_mv)
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn set_digital_hysteresis(&self, key: &str, hysteresis_mv: f32) {
+        let mut guard = self.digital.write();
+        let entry = guard.entry(normalize_key(key)).or_default();
+        entry.hysteresis_mv = hysteresis_mv;
+    }
 }
 
 fn pick_range(volts: f64) -> PicoRange {
@@ -356,4 +491,8 @@ fn pick_range(volts: f64) -> PicoRange {
         }
     }
     PicoRange::X1_PROBE_20V
+}
+
+fn normalize_key(key: &str) -> String {
+    key.trim().to_ascii_uppercase()
 }

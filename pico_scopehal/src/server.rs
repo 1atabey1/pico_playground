@@ -16,6 +16,32 @@ use tracing::{debug, info, warn};
 use crate::state::{AppState, FS_PER_SECOND, TriggerEdge};
 
 const MAX_WAVEFORMS_IN_FLIGHT: u32 = 5;
+const AWG_WAVEFORMS: &[&str] = &[
+    "SINE",
+    "SQUARE",
+    "TRIANGLE",
+    "RAMP_UP",
+    "RAMP_DOWN",
+    "DC",
+    "WHITENOISE",
+    "PRBS",
+    "ARBITRARY",
+];
+
+enum CommandResult {
+    NoReply,
+    Reply(String),
+    Exit,
+}
+
+impl From<Option<String>> for CommandResult {
+    fn from(value: Option<String>) -> Self {
+        match value {
+            Some(v) => CommandResult::Reply(v),
+            None => CommandResult::NoReply,
+        }
+    }
+}
 
 pub(crate) fn run_server(
     state: Arc<AppState>,
@@ -57,12 +83,13 @@ fn handle_scpi_session(state: Arc<AppState>, stream: TcpStream, stop_tx: Sender<
         debug!("SCPI <= {}", line);
         if let Some(command) = parse_command(&line) {
             match process_command(&state, &command) {
-                Ok(Some(response)) => {
+                Ok(CommandResult::Reply(response)) => {
                     writer.write_all(response.as_bytes())?;
                     writer.write_all(b"\n")?;
                     writer.flush()?;
                 }
-                Ok(None) => {}
+                Ok(CommandResult::NoReply) => {}
+                Ok(CommandResult::Exit) => break,
                 Err(err) => {
                     let msg = format!("ERR,{}\n", err);
                     writer.write_all(msg.as_bytes())?;
@@ -128,14 +155,21 @@ fn parse_command(line: &str) -> Option<ParsedCommand<'_>> {
     })
 }
 
-fn process_command(state: &Arc<AppState>, command: &ParsedCommand<'_>) -> Result<Option<String>> {
+fn process_command(state: &Arc<AppState>, command: &ParsedCommand<'_>) -> Result<CommandResult> {
     if let Some(subject) = command.subject {
-        return handle_channel_command(state, subject, command);
+        if subject.eq_ignore_ascii_case("AWG") {
+            return handle_awg_command(state, command).map(Into::into);
+        }
+        if let Some(key) = parse_digital_subject(subject) {
+            return handle_digital_command(state, &key, command).map(Into::into);
+        }
+        return handle_channel_command(state, subject, command).map(Into::into);
     }
 
     match command.command.as_str() {
-        "*IDN" if command.is_query => Ok(Some(state.idn())),
-        "CHANS" if command.is_query => Ok(Some(state.channel_count().to_string())),
+        "*IDN" if command.is_query => Ok(Some(state.idn()).into()),
+        "CHANS" if command.is_query => Ok(Some(state.channel_count().to_string()).into()),
+        "SEQNUM" if command.is_query => Ok(Some(state.last_sequence().to_string()).into()),
         "RATES" if command.is_query => {
             let values = state
                 .allowed_sample_rates()
@@ -150,9 +184,9 @@ fn process_command(state: &Arc<AppState>, command: &ParsedCommand<'_>) -> Result
                 .map(|interval| interval.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            Ok(Some(values))
+            Ok(Some(values).into())
         }
-        "RATE" if command.is_query => Ok(Some(state.sample_rate().to_string())),
+        "RATE" if command.is_query => Ok(Some(state.sample_rate().to_string()).into()),
         "RATE" => {
             let rate = command
                 .args
@@ -160,7 +194,7 @@ fn process_command(state: &Arc<AppState>, command: &ParsedCommand<'_>) -> Result
                 .ok_or_else(|| anyhow!("RATE requires an argument"))?
                 .parse()?;
             state.set_sample_rate(rate)?;
-            Ok(None)
+            Ok(CommandResult::NoReply)
         }
         "DEPTHS" if command.is_query => {
             let values = state
@@ -169,9 +203,9 @@ fn process_command(state: &Arc<AppState>, command: &ParsedCommand<'_>) -> Result
                 .map(|d| d.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            Ok(Some(values))
+            Ok(Some(values).into())
         }
-        "DEPTH" if command.is_query => Ok(Some(state.sample_depth().to_string())),
+        "DEPTH" if command.is_query => Ok(Some(state.sample_depth().to_string()).into()),
         "DEPTH" => {
             let depth = command
                 .args
@@ -179,26 +213,39 @@ fn process_command(state: &Arc<AppState>, command: &ParsedCommand<'_>) -> Result
                 .ok_or_else(|| anyhow!("DEPTH requires an argument"))?
                 .parse()?;
             state.set_sample_depth(depth)?;
-            Ok(None)
+            Ok(CommandResult::NoReply)
+        }
+        "BITS" if command.is_query => Ok(Some(state.adc_bits().to_string()).into()),
+        "BITS" => {
+            let bits: u32 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("BITS requires a value"))?
+                .parse()?;
+            state.set_adc_bits(bits)?;
+            Ok(CommandResult::NoReply)
         }
         "START" => {
             state.start_streaming(false)?;
-            Ok(None)
+            Ok(CommandResult::NoReply)
         }
         "STOP" => {
             state.stop_streaming();
-            Ok(None)
+            Ok(CommandResult::NoReply)
         }
         "SINGLE" => {
             state.start_streaming(true)?;
-            Ok(None)
+            Ok(CommandResult::NoReply)
         }
         "FORCE" => {
             state.force_trigger();
-            Ok(None)
+            Ok(CommandResult::NoReply)
         }
-        "ARMED" if command.is_query => Ok(Some(if state.is_armed() { "1" } else { "0" }.into())),
-        cmd if cmd.starts_with("TRIG") => handle_trigger_command(state, command),
+        "ARMED" if command.is_query => {
+            Ok(Some(if state.is_armed() { "1" } else { "0" }.into()).into())
+        }
+        cmd if cmd.starts_with("TRIG") => handle_trigger_command(state, command).map(Into::into),
+        "EXIT" => Ok(CommandResult::Exit),
         _ => bail!("unsupported command {}", command.command),
     }
 }
@@ -298,8 +345,9 @@ fn handle_channel_command(
                 .ok_or_else(|| anyhow!("channel coupling requires an argument"))?
                 .to_ascii_uppercase();
             let coupling = match mode.as_str() {
-                "DC" => PicoCoupling::DC,
-                "AC" => PicoCoupling::AC,
+                "DC" | "DC1M" => PicoCoupling::DC,
+                "AC" | "AC1M" => PicoCoupling::AC,
+                "DC50" => PicoCoupling::DC,
                 _ => bail!("unsupported coupling {mode}"),
             };
             state.set_channel_coupling(index, coupling);
@@ -331,8 +379,23 @@ fn handle_channel_command(
             state.set_channel_offset(index, offset);
             Ok(None)
         }
-        "BWLIM" if command.is_query => Ok(Some("0".into())),
-        "BWLIM" => Ok(None),
+        "BWLIM" => {
+            if command.is_query {
+                let limit = state.channel_bandwidth_limit(index).unwrap_or(0);
+                return Ok(Some(limit.to_string()));
+            }
+            let freq: u32 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("channel bandwidth limit requires a value"))?
+                .parse()?;
+            if freq == 0 {
+                state.set_channel_bandwidth_limit(index, None);
+            } else {
+                state.set_channel_bandwidth_limit(index, Some(freq));
+            }
+            Ok(None)
+        }
         _ => bail!(
             "unsupported channel command {} for {}",
             command.command,
@@ -341,9 +404,152 @@ fn handle_channel_command(
     }
 }
 
+fn handle_awg_command(
+    state: &Arc<AppState>,
+    command: &ParsedCommand<'_>,
+) -> Result<Option<String>> {
+    match command.command.as_str() {
+        "START" => {
+            if command.is_query {
+                let enabled = state.awg_state().enabled;
+                return Ok(Some(if enabled { "1" } else { "0" }.into()));
+            }
+            state.set_awg_enabled(true);
+            Ok(None)
+        }
+        "STOP" => {
+            if command.is_query {
+                let enabled = state.awg_state().enabled;
+                return Ok(Some(if enabled { "1" } else { "0" }.into()));
+            }
+            state.set_awg_enabled(false);
+            Ok(None)
+        }
+        "STATE" if command.is_query => {
+            let enabled = state.awg_state().enabled;
+            Ok(Some(if enabled { "1" } else { "0" }.into()))
+        }
+        "FREQ" => {
+            if command.is_query {
+                let freq = state.awg_state().frequency_hz;
+                return Ok(Some(format!("{freq:.6}")));
+            }
+            let freq: f64 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("AWG:FREQ requires a value"))?
+                .parse()?;
+            state.set_awg_frequency(freq);
+            Ok(None)
+        }
+        "DUTY" => {
+            if command.is_query {
+                let duty = state.awg_state().duty_cycle;
+                return Ok(Some(format!("{duty:.3}")));
+            }
+            let duty: f32 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("AWG:DUTY requires a value"))?
+                .parse()?;
+            state.set_awg_duty(duty);
+            Ok(None)
+        }
+        "RANGE" => {
+            if command.is_query {
+                let range = state.awg_state().range_vpp;
+                return Ok(Some(format!("{range:.3}")));
+            }
+            let range: f32 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("AWG:RANGE requires a value"))?
+                .parse()?;
+            state.set_awg_range(range);
+            Ok(None)
+        }
+        "OFF" => {
+            if command.is_query {
+                let offset = state.awg_state().offset_v;
+                return Ok(Some(format!("{offset:.6}")));
+            }
+            let offset: f32 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("AWG:OFF requires a value"))?
+                .parse()?;
+            state.set_awg_offset(offset);
+            Ok(None)
+        }
+        "SHAPE" => {
+            if command.is_query {
+                let shape = state.awg_state().shape;
+                return Ok(Some(shape));
+            }
+            let waveform = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("AWG:SHAPE requires a value"))?
+                .to_ascii_uppercase();
+            if !AWG_WAVEFORMS.contains(&waveform.as_str()) {
+                bail!("unsupported AWG waveform {waveform}");
+            }
+            state.set_awg_shape(&waveform);
+            Ok(None)
+        }
+        _ => bail!("unsupported AWG command {}", command.command),
+    }
+}
+
+fn handle_digital_command(
+    state: &Arc<AppState>,
+    identifier: &str,
+    command: &ParsedCommand<'_>,
+) -> Result<Option<String>> {
+    match command.command.as_str() {
+        "PRESENT" => {
+            if command.is_query {
+                return Ok(Some("0".into()));
+            }
+            bail!("PRESENT can only be queried");
+        }
+        "HYS" => {
+            if command.is_query {
+                let hyst = state.digital_hysteresis(identifier);
+                return Ok(Some(format!("{hyst:.3}")));
+            }
+            let hysteresis: f32 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("HYS requires a value"))?
+                .parse()?;
+            state.set_digital_hysteresis(identifier, hysteresis);
+            Ok(None)
+        }
+        "THRESH" => {
+            if command.is_query {
+                let thresh = state.digital_threshold(identifier);
+                return Ok(Some(format!("{thresh:.3}")));
+            }
+            let threshold: f32 = command
+                .args
+                .get(0)
+                .ok_or_else(|| anyhow!("THRESH requires a value"))?
+                .parse()?;
+            state.set_digital_threshold(identifier, threshold);
+            Ok(None)
+        }
+        _ => bail!("unsupported digital command {}", command.command),
+    }
+}
+
 fn parse_channel_reference(input: &str, limit: usize) -> Result<usize> {
     let token = input.trim().to_ascii_uppercase();
     if let Some(rest) = token.strip_prefix("CHAN") {
+        let idx: usize = rest.parse()?;
+        return channel_index_from_number(idx, limit);
+    }
+    if let Some(rest) = token.strip_prefix("CH") {
         let idx: usize = rest.parse()?;
         return channel_index_from_number(idx, limit);
     }
@@ -364,6 +570,25 @@ fn parse_channel_reference(input: &str, limit: usize) -> Result<usize> {
         return channel_index_from_number(idx, limit);
     }
     bail!("unable to parse channel reference '{input}'")
+}
+
+fn parse_digital_subject(subject: &str) -> Option<String> {
+    let token = subject.trim();
+    if token.is_empty() {
+        return None;
+    }
+    let upper = token.to_ascii_uppercase();
+    if upper
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+        && upper.contains('D')
+    {
+        Some(upper)
+    } else {
+        None
+    }
 }
 
 fn channel_index_from_number(index: usize, limit: usize) -> Result<usize> {
@@ -432,6 +657,7 @@ fn stream_waveforms(
             Ok(event) => {
                 sequence = sequence.wrapping_add(1);
                 send_waveform(&state, &mut stream, &event, sequence)?;
+                state.update_sequence(sequence);
                 check_for_acks(&mut stream, &mut last_ack)?;
                 while sequence.wrapping_sub(last_ack) >= MAX_WAVEFORMS_IN_FLIGHT {
                     check_for_acks(&mut stream, &mut last_ack)?;
