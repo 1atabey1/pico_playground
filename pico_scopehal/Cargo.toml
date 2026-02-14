@@ -1,0 +1,19 @@
+[package]
+name = "pico_scopehal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+byteorder = "1.5"
+clap = { version = "4.5", features = ["derive"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+pico-sdk = "0.3.1"
+pico-common = "0.3.1"
+pico-device = "0.3.1"
+pico-driver = "0.3.1"
+pico-streaming = "0.3.1"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
