@@ -84,14 +84,16 @@ fn handle_scpi_session(state: Arc<AppState>, stream: TcpStream, stop_tx: Sender<
         if let Some(command) = parse_command(&line) {
             match process_command(&state, &command) {
                 Ok(CommandResult::Reply(response)) => {
+                    println!("Received SCPI cmd: {} and replied: {}", command.command, response);
                     writer.write_all(response.as_bytes())?;
                     writer.write_all(b"\n")?;
                     writer.flush()?;
                 }
-                Ok(CommandResult::NoReply) => {}
+                Ok(CommandResult::NoReply) => {println!("Received SCPI cmd: {} and did not reply :(", command.command);}
                 Ok(CommandResult::Exit) => break,
                 Err(err) => {
                     let msg = format!("ERR,{}\n", err);
+                    println!("Received SCPI cmd: {} and replied: {}", command.command, msg);
                     writer.write_all(msg.as_bytes())?;
                     writer.flush()?;
                 }
