@@ -13,7 +13,7 @@ Rust reimplementation of the ngscopeclient PicoScope hardware abstraction layer.
 ```bash
 cargo build --release
 ```
-The project targets Rust 1.78+ (Edition 2024). Installing the Pico Technology drivers for your platform is still required; `pico-sdk` dynamically loads the vendor libraries at runtime.
+Installing the Pico Technology drivers for your platform is still required; `pico-sdk` dynamically loads the vendor libraries at runtime.
 
 ## Running
 ```bash

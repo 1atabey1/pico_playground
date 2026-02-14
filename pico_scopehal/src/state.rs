@@ -53,7 +53,7 @@ const SUPPORTED_RANGES: &[PicoRange] = &[
     PicoRange::X1_PROBE_20V,
 ];
 
-pub(crate) const FS_PER_SECOND: i64 = 1_000_000_000_000_000;
+pub const FS_PER_SECOND: i64 = 1_000_000_000_000_000;
 const SERVER_NAME: &str = "pico-scopehal-rs";
 
 #[derive(Clone)]
@@ -65,12 +65,12 @@ pub(crate) struct DeviceMetadata {
 }
 
 #[derive(Clone)]
-pub(crate) struct ChannelState {
-    pub(crate) enabled: bool,
-    pub(crate) coupling: PicoCoupling,
-    pub(crate) range: PicoRange,
-    pub(crate) offset: f32,
-    pub(crate) bandwidth_limit_mhz: Option<u32>,
+pub struct ChannelState {
+    pub enabled: bool,
+    pub coupling: PicoCoupling,
+    pub range: PicoRange,
+    pub offset: f32,
+    pub bandwidth_limit_mhz: Option<u32>,
 }
 
 impl Default for ChannelState {
@@ -86,13 +86,13 @@ impl Default for ChannelState {
 }
 
 #[derive(Clone)]
-pub(crate) struct AwgState {
-    pub(crate) enabled: bool,
-    pub(crate) frequency_hz: f64,
-    pub(crate) duty_cycle: f32,
-    pub(crate) range_vpp: f32,
-    pub(crate) offset_v: f32,
-    pub(crate) shape: String,
+pub struct AwgState {
+    pub enabled: bool,
+    pub frequency_hz: f64,
+    pub duty_cycle: f32,
+    pub range_vpp: f32,
+    pub offset_v: f32,
+    pub shape: String,
 }
 
 impl Default for AwgState {
@@ -109,20 +109,20 @@ impl Default for AwgState {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct DigitalChannelState {
-    pub(crate) threshold_mv: f32,
-    pub(crate) hysteresis_mv: f32,
+pub struct DigitalChannelState {
+    pub threshold_mv: f32,
+    pub hysteresis_mv: f32,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum TriggerEdge {
+pub enum TriggerEdge {
     Rising,
     Falling,
     Either,
 }
 
 impl TriggerEdge {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             TriggerEdge::Rising => "RISING",
             TriggerEdge::Falling => "FALLING",
