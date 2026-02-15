@@ -463,7 +463,7 @@ fn handle_awg_command(
             state.set_awg_range(range);
             Ok(None)
         }
-        "OFF" => {
+        "OFFS" => {
             if command.is_query {
                 let offset = state.awg_state().offset_v;
                 return Ok(Some(format!("{offset:.6}")));
@@ -471,7 +471,7 @@ fn handle_awg_command(
             let offset: f32 = command
                 .args
                 .get(0)
-                .ok_or_else(|| anyhow!("AWG:OFF requires a value"))?
+                .ok_or_else(|| anyhow!("AWG:OFFS requires a value"))?
                 .parse()?;
             state.set_awg_offset(offset);
             Ok(None)

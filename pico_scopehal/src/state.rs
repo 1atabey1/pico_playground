@@ -13,9 +13,6 @@ use pico_streaming::PicoStreamingDevice;
 use tracing::info;
 
 const DEFAULT_SAMPLE_RATES: &[u32] = &[
-    1_000_000_000,
-    500_000_000,
-    250_000_000,
     125_000_000,
     62_500_000,
     31_250_000,
@@ -54,7 +51,7 @@ const SUPPORTED_RANGES: &[PicoRange] = &[
 ];
 
 pub const FS_PER_SECOND: i64 = 1_000_000_000_000_000;
-const SERVER_NAME: &str = "pico-scopehal-rs";
+const MAKE_NAME: &str = "Pico Technology";
 
 #[derive(Clone)]
 pub(crate) struct DeviceMetadata {
@@ -206,7 +203,7 @@ impl AppState {
     pub(crate) fn idn(&self) -> String {
         format!(
             "{},{},{},{}",
-            SERVER_NAME,
+            MAKE_NAME,
             self.metadata.variant,
             self.metadata.serial,
             env!("CARGO_PKG_VERSION")

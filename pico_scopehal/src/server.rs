@@ -161,14 +161,11 @@ fn handle_scpi_session(state: Arc<AppState>, stream: TcpStream, stop_tx: Sender<
     let mut writer = stream;
 
     while let Some(line) = read_scpi_line(&mut reader)? {
-        // debug!("SCPI <= {}", line);
+        debug!("SCPI <= {}", line);
         if let Some(command) = parse_command(&line) {
             match process_command(state.as_ref(), &command) {
                 Ok(CommandResult::Reply(response)) => {
-                    // println!(
-                    //     "Received SCPI cmd: {} and replied: {}",
-                    //     command.command, response
-                    // );
+                    debug!("SCPI <= response: {}", response);
                     writer.write_all(response.as_bytes())?;
                     writer.write_all(b"\n")?;
                     writer.flush()?;
@@ -179,9 +176,9 @@ fn handle_scpi_session(state: Arc<AppState>, stream: TcpStream, stop_tx: Sender<
                 Ok(CommandResult::Exit) => break,
                 Err(err) => {
                     let msg = format!("ERR,{}\n", err);
-                    println!(
-                        "Received SCPI cmd: {} and replied: {}",
-                        command.command, msg
+                    warn!(
+                        "Received SCPI cmd: {} and replied with error: {}",
+                        command.command, err
                     );
                     writer.write_all(msg.as_bytes())?;
                     writer.flush()?;
